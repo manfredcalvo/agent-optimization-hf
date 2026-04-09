@@ -1,0 +1,15 @@
+resources:
+  jobs:
+    align_judge:
+      name: "[${bundle.target}] 01 - Align Judge (MemAlign)"
+      tasks:
+        - task_key: "align_judge"
+          notebook_task:
+            notebook_path: ../src/notebooks/01_align_judge.py
+
+    optimize_prompts:
+      name: "[${bundle.target}] 02 - Optimize Prompts (GEPA)"
+      tasks:
+        - task_key: "optimize_prompts"
+          notebook_task:
+            notebook_path: ../src/notebooks/02_optimize_prompts.py

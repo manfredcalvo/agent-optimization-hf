@@ -1,0 +1,12 @@
+bundle:
+  name: prompt-optimization-workshop
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      profile: andreas_workspace
