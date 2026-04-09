@@ -71,43 +71,18 @@ print(f"Optimization experiment: {experiment_name}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 1: Register Prompts in the MLflow Prompt Registry
+# MAGIC ## Step 1: Register Prompt in the MLflow Prompt Registry
 # MAGIC
-# MAGIC We register two prompts that form the classification pipeline:
-# MAGIC - **complaint_analyzer**: Takes raw complaint text and extracts structured information
-# MAGIC - **complaint_router**: Takes the analysis + complaint and outputs `Department: X | Priority: Y`
+# MAGIC We register a single classification prompt that takes a complaint and outputs
+# MAGIC `Department: X | Priority: Y`.
 
 # COMMAND ----------
 
-prompt_analyzer = mlflow.genai.register_prompt(
-    name=f"{UC_CATALOG}.{UC_SCHEMA}.complaint_analyzer",
+prompt_classifier = mlflow.genai.register_prompt(
+    name=f"{UC_CATALOG}.{UC_SCHEMA}.complaint_classifier",
     template=(
-        "You are a financial complaint analyst for a major bank.\n\n"
-        "Analyze the following customer complaint and extract:\n"
-        "1. **Financial Product**: The specific banking product mentioned "
-        "(credit card, mortgage, savings account, checking account, loan, "
-        "investment account, insurance policy, etc.)\n"
-        "2. **Issue Type**: The core problem (unauthorized transaction, fee dispute, "
-        "service delay, account access, processing error, etc.)\n"
-        "3. **Customer Sentiment**: The emotional tone (angry, frustrated, concerned, "
-        "confused, neutral)\n"
-        "4. **Urgency Indicators**: Any time-sensitive elements (pending deadlines, "
-        "financial harm occurring, regulatory implications)\n\n"
-        "Complaint:\n{{complaint_text}}\n\n"
-        "Provide a structured analysis."
-    ),
-)
-
-print(f"Registered: {prompt_analyzer.name} v{prompt_analyzer.version}")
-print(f"URI: {prompt_analyzer.uri}")
-
-# COMMAND ----------
-
-prompt_router = mlflow.genai.register_prompt(
-    name=f"{UC_CATALOG}.{UC_SCHEMA}.complaint_router",
-    template=(
-        "You are a complaint routing specialist for a major bank.\n\n"
-        "Based on the analysis below, classify this complaint.\n\n"
+        "You are a complaint classification specialist for a major bank.\n\n"
+        "Classify the following customer complaint into a Department and Priority.\n\n"
         "**Department** (choose exactly one):\n"
         "- Credit Cards: Credit card billing, rewards, fraud, fees, APR issues\n"
         "- Mortgages: Home loans, refinancing, escrow, foreclosure, PMI\n"
@@ -119,14 +94,13 @@ prompt_router = mlflow.genai.register_prompt(
         "- High: Significant financial impact, compliance issues, time-sensitive errors\n"
         "- Medium: Service failures, processing delays, moderate inconvenience\n"
         "- Low: General inquiries, minor requests, informational\n\n"
-        "Analysis:\n{{analysis}}\n\n"
-        "Original Complaint:\n{{complaint_text}}\n\n"
+        "Complaint:\n{{complaint_text}}\n\n"
         "Respond in EXACTLY this format: Department: <department> | Priority: <priority>"
     ),
 )
 
-print(f"Registered: {prompt_router.name} v{prompt_router.version}")
-print(f"URI: {prompt_router.uri}")
+print(f"Registered: {prompt_classifier.name} v{prompt_classifier.version}")
+print(f"URI: {prompt_classifier.uri}")
 
 # COMMAND ----------
 
@@ -247,41 +221,25 @@ print(f"Priority distribution: {dict(pris)}")
 # MAGIC %md
 # MAGIC ## Step 3: Define the Prediction Function
 # MAGIC
-# MAGIC The `predict_fn` chains both prompts:
-# MAGIC 1. Load **complaint_analyzer** from the registry → call LLM → get analysis
-# MAGIC 2. Load **complaint_router** from the registry → call LLM with analysis → get classification
+# MAGIC The `predict_fn` loads the classification prompt from the registry and calls the LLM.
 # MAGIC
-# MAGIC **Important**: The function must load prompts via `mlflow.genai.load_prompt()` each time.
+# MAGIC **Important**: The function must load the prompt via `mlflow.genai.load_prompt()` each time.
 # MAGIC The optimizer modifies prompt versions in the registry and re-runs this function
 # MAGIC to test improvements.
 
 # COMMAND ----------
 
 def predict_fn(complaint_text: str) -> str:
-    # Step 1: Analyze the complaint
-    p1 = mlflow.genai.load_prompt(f"prompts:/{UC_CATALOG}.{UC_SCHEMA}.complaint_analyzer/{prompt_analyzer.version}")
-    analysis_content = p1.format(complaint_text=complaint_text)
+    prompt = mlflow.genai.load_prompt(f"prompts:/{UC_CATALOG}.{UC_SCHEMA}.complaint_classifier/{prompt_classifier.version}")
+    content = prompt.format(complaint_text=complaint_text)
 
-    analysis_response = client.chat.completions.create(
+    response = client.chat.completions.create(
         model=MODEL_ENDPOINT,
-        messages=[{"role": "user", "content": analysis_content}],
-        max_tokens=500,
-        temperature=0.0,
-    )
-    analysis = analysis_response.choices[0].message.content
-
-    # Step 2: Route based on analysis
-    p2 = mlflow.genai.load_prompt(f"prompts:/{UC_CATALOG}.{UC_SCHEMA}.complaint_router/{prompt_router.version}")
-    routing_content = p2.format(complaint_text=complaint_text, analysis=analysis)
-
-    routing_response = client.chat.completions.create(
-        model=MODEL_ENDPOINT,
-        messages=[{"role": "user", "content": routing_content}],
+        messages=[{"role": "user", "content": content}],
         max_tokens=100,
         temperature=0.0,
     )
-    classification = routing_response.choices[0].message.content.strip()
-    return classification
+    return response.choices[0].message.content.strip()
 
 # COMMAND ----------
 
@@ -415,7 +373,7 @@ baseline_eval.tables["eval_results"]
 result = mlflow.genai.optimize_prompts(
     predict_fn=predict_fn,
     train_data=train_data,
-    prompt_uris=[prompt_analyzer.uri, prompt_router.uri],
+    prompt_uris=[prompt_classifier.uri],
     optimizer=GepaPromptOptimizer(
         reflection_model=OPTIMIZER_MODEL,
         max_metric_calls=MAX_METRIC_CALLS,
@@ -460,34 +418,20 @@ for p in result.optimized_prompts:
 
 # COMMAND ----------
 
-optimized_p1 = result.optimized_prompts[0]
-optimized_p2 = result.optimized_prompts[1]
+optimized_prompt = result.optimized_prompts[0]
 
 
 def optimized_predict_fn(complaint_text: str) -> str:
-    # Step 1: Analyze with optimized prompt
-    p1 = mlflow.genai.load_prompt(f"prompts:/{UC_CATALOG}.{UC_SCHEMA}.complaint_analyzer/{optimized_p1.version}")
-    analysis_content = p1.format(complaint_text=complaint_text)
+    prompt = mlflow.genai.load_prompt(f"prompts:/{UC_CATALOG}.{UC_SCHEMA}.complaint_classifier/{optimized_prompt.version}")
+    content = prompt.format(complaint_text=complaint_text)
 
-    analysis_response = client.chat.completions.create(
+    response = client.chat.completions.create(
         model=MODEL_ENDPOINT,
-        messages=[{"role": "user", "content": analysis_content}],
-        max_tokens=500,
-        temperature=0.0,
-    )
-    analysis = analysis_response.choices[0].message.content
-
-    # Step 2: Route with optimized prompt
-    p2 = mlflow.genai.load_prompt(f"prompts:/{UC_CATALOG}.{UC_SCHEMA}.complaint_router/{optimized_p2.version}")
-    routing_content = p2.format(complaint_text=complaint_text, analysis=analysis)
-
-    routing_response = client.chat.completions.create(
-        model=MODEL_ENDPOINT,
-        messages=[{"role": "user", "content": routing_content}],
+        messages=[{"role": "user", "content": content}],
         max_tokens=100,
         temperature=0.0,
     )
-    return routing_response.choices[0].message.content.strip()
+    return response.choices[0].message.content.strip()
 
 # COMMAND ----------
 
@@ -531,18 +475,15 @@ for key in all_metric_keys:
 # MAGIC
 # MAGIC In this notebook we:
 # MAGIC
-# MAGIC 1. **Registered two chained prompts** in the MLflow Prompt Registry:
-# MAGIC    - `complaint_analyzer` — extracts structured info from raw complaints
-# MAGIC    - `complaint_router` — classifies into Department + Priority
+# MAGIC 1. **Registered a classification prompt** in the MLflow Prompt Registry
 # MAGIC 2. **Created a training dataset** with 20 banking complaints across 5 departments and 4 priorities
-# MAGIC 3. **Defined custom scorers** for department accuracy, priority accuracy, and exact match
-# MAGIC 4. **Loaded the aligned judge** from Notebook 1 as an additional scorer (if available)
-# MAGIC 5. **Optimized both prompts simultaneously** using GEPA — the optimizer reflects on failures and proposes better prompt templates
-# MAGIC 6. **Compared results** — the optimized prompts produce more accurate classifications
+# MAGIC 3. **Ran a baseline evaluation** with code-based scorers and the aligned judge
+# MAGIC 4. **Optimized the prompt** using GEPA with exact match scoring
+# MAGIC 5. **Ran a post-optimization evaluation** with the same scorers
+# MAGIC 6. **Compared results** — baseline vs optimized metrics side by side
 # MAGIC
 # MAGIC ### Key Takeaways
 # MAGIC
-# MAGIC - **Multi-prompt optimization** handles interdependencies — improving the analyzer prompt changes what the router receives
-# MAGIC - **Custom scorers** let you measure exactly what matters (department accuracy vs. priority accuracy vs. both)
+# MAGIC - **Automated prompt optimization** systematically improves prompts through reflection and iteration
 # MAGIC - **Aligned judges** from Notebook 1 capture domain expertise that pure keyword matching cannot
 # MAGIC - Optimized prompts are **versioned** in the Prompt Registry — you can always compare or roll back
